@@ -1,0 +1,22 @@
+<launch>
+    <!-- Semantic Navigator Node -->
+    <node name="semantic_navigator" pkg="semantic_navigator_ros" type="navigator_node.py" output="screen">
+        <param name="inference_interval" value="5"/>
+        <param name="show_segmentation" value="true"/>
+        <param name="detect_objects" value="true"/>
+    </node>
+
+    <!-- Start the USB Camera Node -->
+    <!-- Make sure the 'video_device' value matches your camera's device path -->
+    <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen" >
+        <param name="video_device" value="/dev/video0" />
+        <param name="image_width" value="640" />
+        <param name="image_height" value="480" />
+        <param name="pixel_format" value="yuyv" />
+        <param name="camera_frame_id" value="usb_cam" />
+        <param name="io_method" value="mmap"/>
+    </node>
+
+    <!-- Optional: RViz for visualization -->
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find semantic_navigator_ros)/launch/navigate.rviz" required="true" />
+</launch> 
