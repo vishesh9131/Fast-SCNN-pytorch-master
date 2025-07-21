@@ -1,9 +1,23 @@
 <launch>
     <!-- Semantic Navigator Node -->
-    <node name="semantic_navigator" pkg="semantic_navigator_ros" type="navigator_node.py" output="screen">
+    <node name="semantic_navigator_node" pkg="semantic_navigator_ros" type="navigator_node.py" output="screen">
+        <!-- General Performance -->
         <param name="inference_interval" value="5"/>
+        
+        <!-- Feature Flags -->
         <param name="show_segmentation" value="true"/>
         <param name="detect_objects" value="true"/>
+        <param name="use_depth" value="true"/>
+        
+        <!-- Robot & Navigation Configuration -->
+        <!-- The robot's width as a percentage of the camera view (e.g., 0.4 = 40%) -->
+        <param name="robot_width_percent" value="0.4"/>
+        <!-- The height of the area to scan for obstacles as a percentage of the view (e.g., 0.25 = 25%) -->
+        <param name="scan_height_percent" value="0.25"/>
+        <!-- The score threshold at which the robot decides to STOP -->
+        <param name="stop_threshold" value="8000000"/>
+        <!-- The normalized closeness score (0-1000) to consider an object a threat. Tune this for your environment. -->
+        <param name="depth_threat_threshold" value="800"/>
     </node>
 
     <!-- Start the USB Camera Node -->
