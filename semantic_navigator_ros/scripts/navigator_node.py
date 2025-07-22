@@ -54,7 +54,7 @@ class SemanticNavigatorNode:
         
         # --- ROS Communications ---
         self.bridge = CvBridge()
-        self.image_sub = rospy.Subscriber("/usb_cam/image_raw", Image, self.image_callback, queue_size=1, buff_size=2**24)
+        self.image_sub = rospy.Subscriber("/ascamera_hp60c/rgb0/image", Image, self.image_callback, queue_size=1, buff_size=2**24)
         self.cmd_vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
         self.vis_pub = rospy.Publisher('/semantic_navigation/visualization', Image, queue_size=1)
         self.depth_pub = rospy.Publisher('/semantic_navigation/depth_map', Image, queue_size=1)
