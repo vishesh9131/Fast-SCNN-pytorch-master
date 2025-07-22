@@ -122,3 +122,4 @@ Realtime-Lane-Segmentation/yolov3.weights
 Lane_Detection/yolov3.weights
 semantic_navigator_ros/models/fast_scnn_citys.pth
 semantic_navigator_ros/models/yolov3.weights
+*.avi

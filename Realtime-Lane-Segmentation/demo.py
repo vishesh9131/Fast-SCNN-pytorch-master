@@ -13,6 +13,8 @@ import numpy as np
 from torchvision import transforms
 from PIL import Image
 from models.fast_scnn import get_fast_scnn
+from models.bisenet_v2 import get_bisenet_v2
+from models.tensorrt_utils import optimize_model_with_tensorrt, TensorRTInference, is_tensorrt_available
 from utils.visualize import get_color_pallete
 
 def main():
@@ -22,6 +24,16 @@ def main():
     parser.add_argument('--output-path', type=str, default='output.avi', help='Path to save the output video.')
     parser.add_argument('--cpu', action='store_true', help='Force CPU for inference.')
     parser.add_argument('--inference-interval', type=int, default=5, help='Run heavy inference every N frames for performance.')
+
+    # --- Model selection ---
+    parser.add_argument('--model', type=str, choices=['fast-scnn', 'bisenet-v2'], default='fast-scnn', 
+                       help='Choose segmentation model: fast-scnn or bisenet-v2 (default: fast-scnn)')
+    parser.add_argument('--dataset', type=str, choices=['citys', 'coco'], default='citys',
+                       help='Dataset for model weights: citys or coco (default: citys)')
+
+    # --- Performance optimization ---
+    parser.add_argument('--fast_load', action='store_true', 
+                       help='Use TensorRT optimization for faster inference (requires CUDA and TensorRT)')
 
     # --- Feature flags ---
     parser.add_argument('--navigate', action='store_true', help='Enable semantic navigation decision-making.')
@@ -37,14 +49,55 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     print(f"Using device: {device}")
 
+    # --- TensorRT Optimization Check ---
+    use_tensorrt = args.fast_load and is_tensorrt_available() and device.type == 'cuda'
+    if args.fast_load and not use_tensorrt:
+        if not is_tensorrt_available():
+            print("Warning: TensorRT not available. Install with: pip install tensorrt pycuda")
+        elif device.type == 'cpu':
+            print("Warning: TensorRT requires CUDA. Running on CPU instead.")
+        print("Falling back to standard PyTorch inference.")
+
     # --- Load Models ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 1. Fast-SCNN (Semantic Segmentation)
+    # 1. Semantic Segmentation Model (Fast-SCNN or BiSeNet V2)
     scnn_weights_path = os.path.join(script_dir, 'weights')
-    scnn_model = get_fast_scnn('citys', pretrained=True, root=scnn_weights_path, map_cpu=(device.type == 'cpu')).to(device)
+    
+    if args.model == 'fast-scnn':
+        scnn_model = get_fast_scnn(args.dataset, pretrained=True, root=scnn_weights_path, map_cpu=(device.type == 'cpu')).to(device)
+        model_name = f"fast_scnn_{args.dataset}"
+        print(f"Fast-SCNN model loaded for {args.dataset} dataset.")
+    elif args.model == 'bisenet-v2':
+        scnn_model = get_bisenet_v2(args.dataset, pretrained=True, root=scnn_weights_path, map_cpu=(device.type == 'cpu')).to(device)
+        model_name = f"bisenet_v2_{args.dataset}"
+        print(f"BiSeNet V2 model loaded for {args.dataset} dataset.")
+    
     scnn_model.eval()
-    print("Fast-SCNN model loaded.")
+
+    # TensorRT Optimization
+    trt_engine = None
+    if use_tensorrt:
+        print("🚀 Optimizing model with TensorRT for faster inference...")
+        input_shape = (1, 3, 480, 640)  # (batch, channels, height, width)
+        engine_path = optimize_model_with_tensorrt(
+            scnn_model, 
+            model_name, 
+            scnn_weights_path, 
+            input_shape, 
+            fp16=True
+        )
+        
+        if engine_path:
+            try:
+                trt_engine = TensorRTInference(engine_path)
+                print("✅ TensorRT optimization successful! Using accelerated inference.")
+            except Exception as e:
+                print(f"Warning: TensorRT engine loading failed: {e}")
+                print("Falling back to standard PyTorch inference.")
+                trt_engine = None
+        else:
+            print("TensorRT optimization failed. Using standard PyTorch inference.")
 
     # 2. YOLO (Object Detection)
     yolo_net, yolo_classes = None, None
@@ -112,10 +165,18 @@ def main():
             image_pil = Image.fromarray(image_rgb_numpy)
             
             with torch.no_grad():
-                # Fast-SCNN Inference
-                image_tensor = scnn_transform(image_pil).unsqueeze(0).to(device)
-                outputs = scnn_model(image_tensor)
-                last_pred = torch.argmax(outputs[0], 1).squeeze(0).cpu().data.numpy().astype(np.uint8)
+                # Semantic Segmentation Inference (Fast-SCNN or BiSeNet V2)
+                if trt_engine is not None:
+                    # TensorRT accelerated inference
+                    image_tensor = scnn_transform(image_pil).unsqueeze(0)
+                    input_np = image_tensor.cpu().numpy().astype(np.float32)
+                    trt_output = trt_engine.infer(input_np)
+                    last_pred = np.argmax(trt_output, axis=1).squeeze(0).astype(np.uint8)
+                else:
+                    # Standard PyTorch inference
+                    image_tensor = scnn_transform(image_pil).unsqueeze(0).to(device)
+                    outputs = scnn_model(image_tensor)
+                    last_pred = torch.argmax(outputs[0], 1).squeeze(0).cpu().data.numpy().astype(np.uint8)
 
                 # MiDaS Depth Inference
                 if args.use_depth and midas:

@@ -17,6 +17,8 @@ import sys
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(script_dir, '..'))
 from models.fast_scnn import get_fast_scnn
+from models.bisenet_v2 import get_bisenet_v2
+from models.tensorrt_utils import optimize_model_with_tensorrt, TensorRTInference, is_tensorrt_available
 from utils.visualize import get_color_pallete
 
 class SemanticNavigatorNode:
@@ -30,6 +32,13 @@ class SemanticNavigatorNode:
         self.show_segmentation = rospy.get_param('~show_segmentation', True)
         self.detect_objects = rospy.get_param('~detect_objects', True)
         self.use_depth = rospy.get_param('~use_depth', True)
+        
+        # Model selection parameters
+        self.model_type = rospy.get_param('~model', 'fast-scnn')  # 'fast-scnn' or 'bisenet-v2'
+        self.dataset = rospy.get_param('~dataset', 'citys')  # 'citys' or 'coco'
+        
+        # TensorRT optimization parameter
+        self.fast_load = rospy.get_param('~fast_load', False)
         
         # Robot and Navigation parameters
         self.robot_width_percent = rospy.get_param('~robot_width_percent', 0.4)
@@ -60,10 +69,61 @@ class SemanticNavigatorNode:
 
     def load_models(self):
         models_path = os.path.join(script_dir, '..', 'models')
-        # 1. Fast-SCNN
-        self.scnn_model = get_fast_scnn('citys', pretrained=True, root=models_path, map_cpu=(self.device.type == 'cpu')).to(self.device)
-        self.scnn_model.eval()
-        rospy.loginfo("Fast-SCNN model loaded.")
+        
+        # 1. Semantic Segmentation Model (Fast-SCNN or BiSeNet V2)
+        if self.model_type == 'fast-scnn':
+            self.scnn_model = get_fast_scnn(self.dataset, pretrained=True, root=models_path, map_cpu=(self.device.type == 'cpu')).to(self.device)
+            self.scnn_model.eval()
+            model_name = f"fast_scnn_{self.dataset}"
+            rospy.loginfo(f"Fast-SCNN model loaded for {self.dataset} dataset.")
+        elif self.model_type == 'bisenet-v2':
+            self.scnn_model = get_bisenet_v2(self.dataset, pretrained=True, root=models_path, map_cpu=(self.device.type == 'cpu')).to(self.device)
+            self.scnn_model.eval()
+            model_name = f"bisenet_v2_{self.dataset}"
+            rospy.loginfo(f"BiSeNet V2 model loaded for {self.dataset} dataset.")
+        else:
+            rospy.logerr(f"Unknown model type: {self.model_type}. Supported: fast-scnn, bisenet-v2")
+            return
+            
+        # TensorRT Optimization
+        self.trt_engine = None
+        use_tensorrt = self.fast_load and is_tensorrt_available() and self.device.type == 'cuda'
+        
+        if self.fast_load and not use_tensorrt:
+            if not is_tensorrt_available():
+                rospy.logwarn("TensorRT not available. Install with: pip install tensorrt pycuda")
+            elif self.device.type == 'cpu':
+                rospy.logwarn("TensorRT requires CUDA. Running on CPU instead.")
+            rospy.logwarn("Falling back to standard PyTorch inference.")
+        
+        if use_tensorrt:
+            rospy.loginfo("🚀 Optimizing model with TensorRT for faster inference...")
+            input_shape = (1, 3, 480, 640)  # (batch, channels, height, width)
+            engine_path = optimize_model_with_tensorrt(
+                self.scnn_model, 
+                model_name, 
+                models_path, 
+                input_shape, 
+                fp16=True
+            )
+            
+            if engine_path:
+                try:
+                    self.trt_engine = TensorRTInference(engine_path)
+                    rospy.loginfo("✅ TensorRT optimization successful! Using accelerated inference.")
+                except Exception as e:
+                    rospy.logwarn(f"TensorRT engine loading failed: {e}")
+                    rospy.logwarn("Falling back to standard PyTorch inference.")
+                    self.trt_engine = None
+            else:
+                rospy.logwarn("TensorRT optimization failed. Using standard PyTorch inference.")
+            
+        # Setup transforms for the segmentation model
+        self.scnn_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+        
         # 2. YOLO
         self.yolo_net = None
         if self.detect_objects:
@@ -73,6 +133,7 @@ class SemanticNavigatorNode:
             except Exception as e:
                 rospy.logerr(f"Failed to load YOLO: {e}")
                 self.detect_objects = False
+                
         # 3. MiDaS
         self.midas, self.midas_transform = None, None
         if self.use_depth:
@@ -111,7 +172,18 @@ class SemanticNavigatorNode:
         image_pil = PILImage.fromarray(image_rgb_numpy)
         
         with torch.no_grad():
-            self.last_pred = self.scnn_model(self.scnn_transform(image_pil).unsqueeze(0).to(self.device))[0].argmax(1).squeeze(0).cpu().numpy().astype(np.uint8)
+            # Semantic Segmentation Inference
+            if self.trt_engine is not None:
+                # TensorRT accelerated inference
+                image_tensor = self.scnn_transform(image_pil).unsqueeze(0)
+                input_np = image_tensor.cpu().numpy().astype(np.float32)
+                trt_output = self.trt_engine.infer(input_np)
+                self.last_pred = np.argmax(trt_output, axis=1).squeeze(0).astype(np.uint8)
+            else:
+                # Standard PyTorch inference
+                image_tensor = self.scnn_transform(image_pil).unsqueeze(0).to(self.device)
+                outputs = self.scnn_model(image_tensor)
+                self.last_pred = outputs[0].argmax(1).squeeze(0).cpu().numpy().astype(np.uint8)
 
             if self.use_depth and self.midas:
                 midas_input = self.midas_transform(image_rgb_numpy).to(self.device)

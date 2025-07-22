@@ -1,6 +1,16 @@
 <launch>
     <!-- Semantic Navigator Node -->
     <node name="semantic_navigator_node" pkg="semantic_navigator_ros" type="navigator_node.py" output="screen">
+        <!-- Model Selection -->
+        <!-- Choose between 'fast-scnn' and 'bisenet-v2' -->
+        <param name="model" value="fast-scnn"/>
+        <!-- Choose dataset: 'citys' or 'coco' -->
+        <param name="dataset" value="citys"/>
+        
+        <!-- Performance Optimization -->
+        <!-- Use TensorRT for faster inference (requires CUDA and TensorRT installation) -->
+        <param name="fast_load" value="false"/>
+        
         <!-- General Performance -->
         <param name="inference_interval" value="5"/>
         
