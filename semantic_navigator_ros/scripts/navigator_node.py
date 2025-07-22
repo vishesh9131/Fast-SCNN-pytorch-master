@@ -215,7 +215,11 @@ class SemanticNavigatorNode:
                 blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
                 self.yolo_net.setInput(blob)
                 layer_names = self.yolo_net.getLayerNames()
-                output_layers = [layer_names[i - 1] for i in self.yolo_net.getUnconnectedOutLayers()]
+                # Fix: Flatten the array to handle both old and new OpenCV versions
+                unconnected_layers = self.yolo_net.getUnconnectedOutLayers()
+                if len(unconnected_layers.shape) > 1:
+                    unconnected_layers = unconnected_layers.flatten()
+                output_layers = [layer_names[i - 1] for i in unconnected_layers]
                 yolo_outs = self.yolo_net.forward(output_layers)
                 
                 # Fix YOLO detection parsing to handle different array types

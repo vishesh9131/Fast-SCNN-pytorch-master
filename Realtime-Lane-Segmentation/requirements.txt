@@ -4,6 +4,9 @@ opencv-python>=4.5.0
 Pillow>=8.0.0
 numpy>=1.19.0
 
+# For MiDaS depth estimation
+timm>=0.4.0
+
 # Optional: TensorRT acceleration (requires CUDA)
 # tensorrt>=8.0.0
 # pycuda>=2021.1
