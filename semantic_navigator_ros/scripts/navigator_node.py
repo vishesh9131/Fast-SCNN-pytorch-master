@@ -26,6 +26,12 @@ class SemanticNavigatorNode:
         rospy.init_node('semantic_navigator_node')
         rospy.loginfo("Initializing Semantic Navigator Node...")
 
+        # --- Initialize counters and variables first ---
+        self.frame_count = 0
+        self.last_pred = None
+        self.last_boxes = None 
+        self.last_depth = None
+
         # --- Load Parameters from ROS Param Server ---
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.inference_interval = rospy.get_param('~inference_interval', 5)
@@ -63,8 +69,6 @@ class SemanticNavigatorNode:
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ])
         
-        self.frame_count = 0
-        self.last_pred, self.last_boxes, self.last_depth = None, None, None
         rospy.loginfo("Semantic Navigator Node is ready.")
 
     def load_models(self):
@@ -183,7 +187,16 @@ class SemanticNavigatorNode:
                 # Standard PyTorch inference
                 image_tensor = self.scnn_transform(image_pil).unsqueeze(0).to(self.device)
                 outputs = self.scnn_model(image_tensor)
-                self.last_pred = outputs[0].argmax(1).squeeze(0).cpu().numpy().astype(np.uint8)
+                
+                # Handle different model output formats
+                if isinstance(outputs, tuple):
+                    # BiSeNet V2 and some models return tuple
+                    segmentation_output = outputs[0]
+                else:
+                    # Fast-SCNN and others return tensor directly
+                    segmentation_output = outputs
+                    
+                self.last_pred = segmentation_output.argmax(1).squeeze(0).cpu().numpy().astype(np.uint8)
 
             if self.use_depth and self.midas:
                 midas_input = self.midas_transform(image_rgb_numpy).to(self.device)
@@ -204,7 +217,20 @@ class SemanticNavigatorNode:
                 layer_names = self.yolo_net.getLayerNames()
                 output_layers = [layer_names[i - 1] for i in self.yolo_net.getUnconnectedOutLayers()]
                 yolo_outs = self.yolo_net.forward(output_layers)
-                self.last_boxes = [det[0:4] * np.array([frame.shape[1], frame.shape[0], frame.shape[1], frame.shape[0]]) for out in yolo_outs for det in out if det[5:].max() > 0.5]
+                
+                # Fix YOLO detection parsing to handle different array types
+                self.last_boxes = []
+                for out in yolo_outs:
+                    for detection in out:
+                        # Make sure detection is a numpy array
+                        if isinstance(detection, (list, tuple)):
+                            detection = np.array(detection)
+                        
+                        # Check if we have enough elements and confidence > 0.5
+                        if len(detection) >= 6 and detection[5:].max() > 0.5:
+                            # Scale bounding box coordinates
+                            box_coords = detection[0:4] * np.array([frame.shape[1], frame.shape[0], frame.shape[1], frame.shape[0]])
+                            self.last_boxes.append(box_coords)
 
     def run_navigation_and_visualization(self, frame, header):
         output_frame = frame.copy()
@@ -244,7 +270,30 @@ class SemanticNavigatorNode:
         depth_roi = depth_map[y1:y2, x1:x2]
         return np.mean(depth_roi) < self.depth_threat_threshold if depth_roi.size > 0 else True
 
+    def is_path_safe(self, box, depth_map):
+        if depth_map is None or box is None or len(box) < 4:
+            return True  # Default to safe if no data
+            
+        shape = depth_map.shape
+        if len(shape) < 2:
+            return True
+            
+        center_x, center_y, w, h = box
+        x1 = max(0, int(center_x - w/2))
+        y1 = max(0, int(center_y - h/2))
+        x2 = min(shape[1], int(center_x + w/2))
+        y2 = min(shape[0], int(center_y + h/2))
+        
+        if x1 >= x2 or y1 >= y2:
+            return True  # Invalid box, default to safe
+            
+        depth_roi = depth_map[y1:y2, x1:x2]
+        return np.mean(depth_roi) < self.depth_threat_threshold if depth_roi.size > 0 else True
+
     def get_box_coords(self, box, shape):
+        if box is None or len(box) < 4 or len(shape) < 2:
+            return 0, 0, 0, 0  # Return default coords for invalid input
+            
         center_x, center_y, w, h = box.astype('int')
         x1 = max(0, int(center_x - w/2))
         y1 = max(0, int(center_y - h/2))
@@ -253,15 +302,28 @@ class SemanticNavigatorNode:
         return x1, y1, x2, y2
 
     def find_best_path(self, cost_map, shape):
+        if cost_map is None or len(shape) < 2 or shape[0] == 0 or shape[1] == 0:
+            return 0, "Go Straight", 0.0  # Default safe values
+            
         zone_height_pixels = int(shape[0] * self.scan_height_percent)
         zone_width_pixels = int(shape[1] * self.robot_width_percent)
+        
+        if zone_height_pixels <= 0 or zone_width_pixels <= 0:
+            return 0, "Go Straight", 0.0
+            
         scan_area = cost_map[-zone_height_pixels:, :]
         perspective_weights = np.linspace(1, 5, zone_height_pixels).reshape(zone_height_pixels, 1)
         weighted_scan_area = scan_area * perspective_weights
         
+        if shape[1] - zone_width_pixels <= 0:
+            return 0, "Go Straight", 0.0
+            
         path_scores = [np.sum(weighted_scan_area[:, x:x+zone_width_pixels]) for x in range(shape[1] - zone_width_pixels)]
         
-        best_path_start_x = np.argmin(path_scores) if path_scores else 0
+        if not path_scores:
+            return 0, "Go Straight", 0.0
+            
+        best_path_start_x = np.argmin(path_scores)
         best_path_score = path_scores[best_path_start_x] if path_scores else float('inf')
         
         decision = "STOP"
@@ -306,11 +368,24 @@ class SemanticNavigatorNode:
                 cv2.putText(frame, text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     
     def publish_safe_zone_cloud(self, cost_map, header):
-        safe_pixels = np.argwhere(cost_map == 0)
-        points = [[(p[1]/cost_map.shape[1])*2-1, (p[0]/cost_map.shape[0])*2-1, 0] for p in safe_pixels]
-        if points:
-            cloud_msg = pc2.create_cloud_xyz32(header, points)
-            self.point_cloud_pub.publish(cloud_msg)
+        if cost_map is None or cost_map.size == 0:
+            return  # Skip if no cost map data
+            
+        try:
+            safe_pixels = np.argwhere(cost_map == 0)
+            if safe_pixels.size == 0:
+                return  # No safe pixels found
+                
+            # Ensure cost_map has valid shape
+            if len(cost_map.shape) < 2 or cost_map.shape[0] == 0 or cost_map.shape[1] == 0:
+                return
+                
+            points = [[(p[1]/cost_map.shape[1])*2-1, (p[0]/cost_map.shape[0])*2-1, 0] for p in safe_pixels]
+            if points:
+                cloud_msg = pc2.create_cloud_xyz32(header, points)
+                self.point_cloud_pub.publish(cloud_msg)
+        except Exception as e:
+            rospy.logwarn(f"Failed to publish point cloud: {e}")
 
 if __name__ == '__main__':
     try:

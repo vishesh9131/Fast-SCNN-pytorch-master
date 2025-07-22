@@ -43,7 +43,7 @@ def main():
     # --- Visualization flags ---
     parser.add_argument('--show-segmentation', action='store_true', help='Overlay the semantic segmentation mask.')
     parser.add_argument('--show-depth', action='store_true', help='Display the visual depth map in a separate window.')
-    
+
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
@@ -193,18 +193,18 @@ def main():
                     else:
                         last_depth = np.zeros(depth_map.shape)
 
-            # YOLO Inference
-            if args.detect_objects and yolo_net:
-                last_boxes = []
-                blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
-                yolo_net.setInput(blob)
-                layer_names = yolo_net.getLayerNames()
-                output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers()]
-                yolo_outs = yolo_net.forward(output_layers)
-                for yolo_output in yolo_outs:
-                    for detection in yolo_output:
-                        if detection[5:].max() > 0.5:
-                            last_boxes.append(detection[0:4] * np.array([frame_width, frame_height, frame_width, frame_height]))
+                    # YOLO Inference
+                    if args.detect_objects and yolo_net:
+                        last_boxes = []
+                        blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
+                        yolo_net.setInput(blob)
+                        layer_names = yolo_net.getLayerNames()
+                        output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers()]
+                        yolo_outs = yolo_net.forward(output_layers)
+                        for yolo_output in yolo_outs:
+                            for detection in yolo_output:
+                                if detection[5:].max() > 0.5:
+                                    last_boxes.append(detection[0:4] * np.array([frame_width, frame_height, frame_width, frame_height]))
 
         output_frame = np.copy(frame)
         vis_overlay = output_frame.copy()
